@@ -159,7 +159,8 @@ class SPAClient:
             try:
                 response, addr = sock.recvfrom(1024)
                 if response:
-                    print("Server response to key:", response.decode())
+                    wireguard.get_wireguard_conf(response)
+                    # print("Server response to key:", response.decode())
 
             except socket.timeout:
                 print("No response received after sending WireGuard key")

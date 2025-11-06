@@ -1,5 +1,5 @@
 {
-    "server_ip": "127.0.0.1",
+    "server_ip": "10.10.0.2",
     "client_ip": "",
     "server_port": 62201,
     "access_port": 22,
