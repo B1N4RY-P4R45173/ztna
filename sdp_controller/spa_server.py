@@ -17,7 +17,7 @@ import argparse
 import pprint
 import os
 import ipaddress
-import add_wg_peer
+import ssh_manager
 
 class SPAServer:
     def __init__(self, config_file='server_config.json', verbose=False, port=62201, daemon=False):
@@ -37,6 +37,15 @@ class SPAServer:
         if daemon:
             self.daemon = daemon
         
+        self.active_sessions = {}
+        self.keepalive_timeout = self.config.get("keepalive_timeout", 300)
+
+        self.running = True
+        self.session_monitor_thread = threading.Thread(
+            target=self.monitor_sessions,
+            daemon=True
+        )
+        self.session_monitor_thread.start()
         # Initialize other components
         self.setup_logging()
         self.setup_crypto()
@@ -186,7 +195,7 @@ class SPAServer:
                 logging.warning(f"Invalid HMAC from {addr[0]}")
                 self.reply(addr, False, is_keepalive=False)
                 return
-            
+
             # Parse the packet
             packet_data = json.loads(decrypted)
             
@@ -216,6 +225,15 @@ class SPAServer:
             
             # Determine if this is a keepalive packet
             is_keepalive = self.is_keepalive_packet(packet_data)
+
+            if is_keepalive:
+                logging.info(f"Keepalive from {source_ip}")
+                if source_ip in self.active_sessions:
+                    self.active_sessions[source_ip]['last_seen'] = time.time()
+
+                self.reply(addr, True, is_keepalive=True)
+                return
+
             
             # Log the access request
             key = f"{source_ip}:{packet_data.get('access_port', '')}:{packet_data.get('protocol', '')}"
@@ -247,71 +265,94 @@ class SPAServer:
 
     def receive_key(self, addr, packet_data):
         try:
-            self.socket.settimeout(10)  # Wait max 10s for the key
+            # Wait for client's WireGuard public key (max 10s)
+            self.socket.settimeout(10)
             data, sender = self.socket.recvfrom(4096)
-            
-            # Verify the sender is the same as the original requester
+
+            # Key must come from same IP
             if sender[0] != addr[0]:
                 logging.warning(f"Key received from different IP: expected {addr[0]}, got {sender[0]}")
                 return
-                
+
             try:
                 key = data.decode().strip()
             except UnicodeDecodeError:
                 logging.warning(f"Invalid key encoding received from {addr[0]}")
                 return
-                
-            if key:
-                # Extract resource IP from the SPA packet data
-                resource_ip = packet_data.get('resource_ip')
-                gateways = add_wg_peer.load_gateways() # pass in the JSON file if you are using some other name other than sdp_gateway_details.json
-                gateway = add_wg_peer.resolve_gateway(resource_ip, gateways)
-                vpn_ip = gateway["vpn_ip_pool"][0]
-                logging.info(f"WireGuard public key received from {addr[0]}: {key}")
-                
-                # Add peer to WireGuard
-                add_wg_peer.add_peer(vpn_ip, key, resource_ip, gateway)
-                
-                # Prepare gateway details to send to client
-                gateway_details = {
-                    'gateway_public_key': gateway['wireguard_public_key'],
-                    'gateway_endpoint': f"{gateway['ssh_host']}:{gateway['listen_port']}",
-                    'client_vpn_ip': vpn_ip,
-                    'vpn_subnet': gateway['vpn_subnet'],
-                    'gateway_vpn_ip': gateway['vpn_ip_pool'][0] if gateway['vpn_ip_pool'] else None,
-                    'status': 'success'
-                }
-                
-                # Send gateway details as JSON response
-                response = json.dumps(gateway_details).encode()
-                self.socket.sendto(response, addr)
-                
-                logging.info(f"Gateway details sent to {addr[0]}: {gateway_details}")
-                
-            else:
-                logging.warning(f"Empty key received from {addr[0]}")
-                # Send error response
+
+            if not key:
+                logging.warning(f"Empty WireGuard key received from {addr[0]}")
                 error_response = json.dumps({'status': 'error', 'message': 'Empty key received'}).encode()
                 self.socket.sendto(error_response, addr)
+                return
+
+            # Extract resource info from SPA packet
+            resource_ip = packet_data.get('resource_ip')
+            access_port = packet_data.get('access_port')
+
+            # Load and resolve gateway
+            gateways = ssh_manager.load_gateways()
+            gateway = ssh_manager.resolve_gateway(resource_ip, gateways)
+
+            if not gateway:
+                logging.error(f"Gateway not found for resource {resource_ip}")
+                return
+
+            # Assign VPN IP for client
+            vpn_ip = gateway["vpn_ip_pool"][0]
+
+            logging.info(f"WireGuard public key received from {addr[0]}: {key}")
+
+            # Add peer + ACL on gateway
+            ssh_manager.add_peer(vpn_ip, key, resource_ip, gateway)
+            ssh_manager.set_acl(packet_data, gateway)
+
+            # ✅ Store active session (must include access_port for ACL removal)
+            self.active_sessions[addr[0]] = {
+                "client_public_key": key,
+                "gateway": gateway,
+                "last_seen": time.time(),
+                "access_port": access_port
+            }
+
+            # Prepare gateway config for client response
+            gateway_details = {
+                'gateway_public_key': gateway['wireguard_public_key'],
+                'gateway_endpoint': f"{gateway['gateway_public_ip']}:{gateway['listen_port']}",
+                'client_vpn_ip': vpn_ip,
+                'vpn_subnet': gateway['vpn_subnet'],
+                'gateway_vpn_ip': gateway['gateway_vpn_ip'],
+                'status': 'success'
+            }
+
+            # Send JSON back to client
+            response = json.dumps(gateway_details).encode()
+            self.socket.sendto(response, addr)
+
+            logging.info(f"Gateway details sent to {addr[0]}: {gateway_details}")
 
         except socket.timeout:
-            logging.warning(f"No key received from {addr[0]} within timeout")
-            # Send timeout response
+            logging.warning(f"No WireGuard key received from {addr[0]} within timeout")
+
             timeout_response = json.dumps({'status': 'error', 'message': 'Key timeout'}).encode()
             try:
                 self.socket.sendto(timeout_response, addr)
             except:
                 pass
+
         except Exception as e:
-            logging.error(f"Error receiving key from {addr[0]}: {str(e)}")
-            # Send error response
+            logging.error(f"Error receiving WireGuard key from {addr[0]}: {str(e)}")
+
             error_response = json.dumps({'status': 'error', 'message': str(e)}).encode()
             try:
                 self.socket.sendto(error_response, addr)
             except:
                 pass
+
         finally:
-            self.socket.settimeout(None)  # Reset timeout
+            # Reset socket timeout to normal
+            self.socket.settimeout(None)
+
 
     def reply(self, addr, result, is_keepalive=False, packet_data=None):
         try:
@@ -330,6 +371,51 @@ class SPAServer:
                 self.socket.sendto('SPA Verification Failed'.encode(), addr)
         except Exception as e:
             logging.error(f"Error sending reply to {addr[0]}: {str(e)}")
+
+    def monitor_sessions(self):
+        while self.running:
+            try:
+                now = time.time()
+                expired_clients = []
+
+                for client_ip, session in list(self.active_sessions.items()):
+                    last_seen = session["last_seen"]
+
+                    # Timeout check
+                    if now - last_seen > self.keepalive_timeout:
+                        pubkey = session["client_public_key"]
+                        gateway = session["gateway"]
+                        access_port = session["access_port"]
+
+                        logging.warning(
+                            f"[TIMEOUT] {client_ip} inactive → removing peer {pubkey}"
+                        )
+
+                        # Remove WireGuard peer
+                        try:
+                            ssh_manager.remove_peer(pubkey, gateway)
+                        except Exception as e:
+                            logging.error(f"Failed to remove peer {pubkey}: {e}")
+
+                        # Remove ACL (now with access_port)
+                        try:
+                            if hasattr(ssh_manager, "remove_acl"):
+                                ssh_manager.remove_acl(access_port, gateway)
+                        except Exception as e:
+                            logging.error(f"Failed to remove ACL for {client_ip}: {e}")
+
+                        expired_clients.append(client_ip)
+
+                # Remove sessions from table
+                for client_ip in expired_clients:
+                    del self.active_sessions[client_ip]
+
+            except Exception as e:
+                logging.error(f"Session monitor error: {e}")
+
+            time.sleep(30)
+
+
         
     def start(self):
         try:
