@@ -1,6 +1,9 @@
 from  wireguard_tools import *
 import os
 import json
+import subprocess
+import os
+import getpass
 
 private_key = WireguardKey.generate()
 public_key = private_key.public_key()
@@ -71,9 +74,6 @@ def load_wireguard_conf(conf_path="./wg0_conn.conf"):
     Starts WireGuard using the generated configuration.
     Prompts for sudo password if not executed as root.
     """
-    import subprocess
-    import os
-    import getpass
 
     print("🔄 Starting WireGuard tunnel...")
 
