@@ -117,9 +117,7 @@ Thumbs.db
 
 # Project specific
 *.log
-*.key
 *.pem
-*.crt
 *.p12
 *.pfx
 privatekey
