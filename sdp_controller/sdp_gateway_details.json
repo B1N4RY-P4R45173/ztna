@@ -1,34 +1,24 @@
 [
   {
     "gateway_id": "gw-01",
-    "name": "sdp Gateway 1",
-    "ssh_user": "root",
-    "ssh_host": "10.10.1.2",
+    "name": "SDP Gateway 1",
     "gateway_public_ip": "10.10.0.3",
-    "ssh_port": 22,
-    "ssh_key_path": "/home/ajay/.ssh/id_rsa",
-    "wireguard_conf_path": "/etc/wireguard/wg0.conf",
     "wireguard_interface": "wg0",
     "wireguard_public_key": "l492cr6+l5Lv+qhlogWZqD0ooPc3cJco7JxM1ZqPyRg=",
     "listen_port": 51820,
     "vpn_subnet": "10.9.0.0/24, 10.10.2.0/24",
     "gateway_vpn_ip": "10.9.0.1",
-    "vpn_ip_pool": ["10.9.0.2","10.9.0.3", "10.9.0.4", "10.9.0.5"],
-    "status": "online"
-  },
-  {
-    "gateway_id": "gw-02",
-    "name": "sdp Gateway 2",
-    "ssh_user": "test_user",
-    "ssh_host": "some_ip",
-    "ssh_port": 22,
-    "ssh_key_path": "path to ssh .key file ",
-    "wireguard_interface": "wg0",
-    "wireguard_public_key": "wireguard public key",
-    "listen_port": 51820,
-    "vpn_subnet": "10.1.0.0/24",
-    "gateway_vpn_ip": "10.1.0.1",
-    "vpn_ip_pool": ["10.1.0.2", "10.1.0.3", "10.1.0.4"],
+    "vpn_ip_pool": [
+      "10.9.0.2",
+      "10.9.0.3",
+      "10.9.0.4",
+      "10.9.0.5",
+      "10.9.0.6",
+      "10.9.0.7",
+      "10.9.0.8",
+      "10.9.0.9",
+      "10.9.0.10"
+    ],
     "status": "online"
   }
 ]

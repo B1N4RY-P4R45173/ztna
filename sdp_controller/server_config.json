@@ -4,6 +4,7 @@
     "allowed_ips": [
         "0.0.0.0/0"
     ],
+    "mtls_controller_port": 5000,
     "listen_port": 62201,
     "default_rule_timeout": 300,
     "log_file": "spa_server.log",
@@ -13,4 +14,3 @@
     "max_packet_size": 4096,
     "keepalive_timeout": 300
 } 
-
