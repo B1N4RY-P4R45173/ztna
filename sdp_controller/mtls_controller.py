@@ -26,7 +26,7 @@ class MTLSController:
     def __init__(self, host='0.0.0.0', port=5000):
         self.host = host
         self.port = port
-        self.gateway_connections = {}  # gateway_id -> connection
+        self.gateway_connections = {}  # gateway_id -> {connection, address, lock, ...}
         self.running = True
         
     def create_ssl_context(self):
@@ -35,12 +35,12 @@ class MTLSController:
         
         # Load Controller's certificate and key
         context.load_cert_chain(
-            certfile='certs/controller_cert.pem',
-            keyfile='certs/controller_key.pem'
+            certfile='./certs/controller_cert.pem',
+            keyfile='./certs/controller_key.pem'
         )
         
         # Load CA to verify Gateway
-        context.load_verify_locations('certs/ca_cert.pem')
+        context.load_verify_locations('./certs/ca_cert.pem')
         
         # REQUIRE Gateway certificate
         context.verify_mode = ssl.CERT_REQUIRED
@@ -61,27 +61,17 @@ class MTLSController:
             self.gateway_connections[gateway_cn] = {
                 'connection': conn,
                 'address': addr,
-                'connected_at': time.time()
+                'connected_at': time.time(),
+                'lock': threading.Lock()  # Add lock for thread-safe operations
             }
             
             # Keep connection alive - just wait
             # Commands will be sent via send_policy_to_gateway()
+            # Don't try to receive here as it conflicts with send_policy_to_gateway()
             while self.running:
-                # Check if connection is still alive
-                try:
-                    # Set short timeout to check periodically
-                    conn.settimeout(30)
-                    data = conn.recv(1)  # Minimal recv to detect disconnect
-                    
-                    if not data:
-                        logging.warning(f"Gateway {gateway_cn} disconnected")
-                        break
-                        
-                except socket.timeout:
-                    # Normal - no data received, connection still alive
-                    continue
-                except Exception as e:
-                    logging.error(f"Error with Gateway {gateway_cn}: {e}")
+                # Just sleep and check if connection is still in dict
+                time.sleep(10)
+                if gateway_cn not in self.gateway_connections:
                     break
             
         except Exception as e:
@@ -104,44 +94,48 @@ class MTLSController:
         Returns:
             Response from Gateway or None if failed
         """
-        # For now, use 'sdp-gateway' as default
+        # For now, use 'gateway' as default (matches certificate CN)
         # In future, you'll look up which gateway based on resource_id
         if gateway_id not in self.gateway_connections:
             logging.error(f"Gateway {gateway_id} not connected")
             return None
         
-        try:
-            conn = self.gateway_connections[gateway_id]['connection']
-            
-            # Send command
-            logging.info(f"Sending to {gateway_id}: {policy_command['action']}")
-            conn.sendall(json.dumps(policy_command).encode('utf-8'))
-            
-            # Wait for response (with timeout)
-            conn.settimeout(10)
-            response_data = conn.recv(4096)
-            
-            if not response_data:
-                logging.error(f"No response from Gateway {gateway_id}")
-                return None
-            
-            response = json.loads(response_data.decode('utf-8'))
-            logging.info(f"Gateway response: {response['status']}")
-            
-            return response
-            
-        except socket.timeout:
-            logging.error(f"Gateway {gateway_id} response timeout")
-            return None
-        except Exception as e:
-            logging.error(f"Error sending to Gateway {gateway_id}: {e}")
-            return None
-        finally:
-            # Reset timeout
+        gateway_info = self.gateway_connections[gateway_id]
+        conn = gateway_info['connection']
+        lock = gateway_info['lock']
+        
+        # Use lock to prevent concurrent socket operations
+        with lock:
             try:
-                conn.settimeout(None)
-            except:
-                pass
+                # Send command
+                logging.info(f"Sending to {gateway_id}: {policy_command['action']}")
+                conn.sendall(json.dumps(policy_command).encode('utf-8'))
+                
+                # Wait for response (with timeout)
+                conn.settimeout(10)
+                response_data = conn.recv(4096)
+                
+                if not response_data:
+                    logging.error(f"No response from Gateway {gateway_id}")
+                    return None
+                
+                response = json.loads(response_data.decode('utf-8'))
+                logging.info(f"Gateway response: {response['status']}")
+                
+                return response
+                
+            except socket.timeout:
+                logging.error(f"Gateway {gateway_id} response timeout")
+                return None
+            except Exception as e:
+                logging.error(f"Error sending to Gateway {gateway_id}: {e}")
+                return None
+            finally:
+                # Reset timeout
+                try:
+                    conn.settimeout(None)
+                except:
+                    pass
     
     def start_server(self):
         """Start mTLS server to accept Gateway connections"""
@@ -237,9 +231,9 @@ def send_add_peer_to_gateway(vpn_ip, public_key, access_port, protocol, resource
         'client_id': client_id
     }
     
-    # For now, hardcode gateway_id as 'sdp-gateway'
+    # For now, hardcode gateway_id as 'gateway' (matches certificate CN)
     # In future, you'll look up gateway based on resource_id
-    gateway_id = 'sdp-gateway'
+    gateway_id = 'gateway'
     
     # Send to Gateway and wait for response
     response = mtls_controller.send_policy_to_gateway(gateway_id, command)
@@ -278,7 +272,7 @@ def send_remove_peer_to_gateway(public_key, access_port, protocol, resource_id, 
     }
     
     # For now, hardcode gateway_id as 'sdp-gateway'
-    gateway_id = 'sdp-gateway'
+    gateway_id = 'gateway'
     
     # Send to Gateway and wait for response
     response = mtls_controller.send_policy_to_gateway(gateway_id, command)

@@ -335,7 +335,7 @@ class SPAServer:
             
             if is_keepalive:
                 # Just update last_seen and acknowledge
-                self.handle_keepalive(source_ip, addr)
+                self.handle_keepalive(source_ip, addr, packet_data)
             else:
                 # New connection request
                 self.handle_new_connection(packet_data, addr)
@@ -350,8 +350,8 @@ class SPAServer:
                 import traceback
                 traceback.print_exc()
     
-    def handle_keepalive(self, source_ip, addr):
-        """Handle keepalive packet - just update timestamp"""
+    def handle_keepalive(self, source_ip, addr, packet_data):
+        """Handle keepalive packet - update timestamps"""
         # Find client_id by source_ip
         client_id = None
         for cid, session in self.active_sessions.items():
@@ -360,7 +360,16 @@ class SPAServer:
                 break
         
         if client_id and client_id in self.active_sessions:
+            # Update session last_seen
             self.active_sessions[client_id]['last_seen'] = time.time()
+            
+            # Update spa_requests timestamp so next keepalive is detected correctly
+            access_port = packet_data.get('access_port')
+            protocol = packet_data.get('protocol')
+            key = f"{source_ip}:{access_port}:{protocol}"
+            if key in self.spa_requests:
+                self.spa_requests[key]['timestamp'] = time.time()
+            
             logging.info(f"Keepalive from {client_id} ({source_ip})")
             self.send_response(addr, True, "Keepalive acknowledged")
         else:

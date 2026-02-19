@@ -2,9 +2,9 @@
   {
     "gateway_id": "gw-01",
     "name": "SDP Gateway 1",
-    "gateway_public_ip": "10.10.0.3",
+    "gateway_public_ip": "192.168.240.129",
     "wireguard_interface": "wg0",
-    "wireguard_public_key": "l492cr6+l5Lv+qhlogWZqD0ooPc3cJco7JxM1ZqPyRg=",
+    "wireguard_public_key": "JrZFSvIkUy9ryWQyYlREy4+qSO1TPf/3t1mFbU0kXHE=",
     "listen_port": 51820,
     "vpn_subnet": "10.9.0.0/24, 10.10.2.0/24",
     "gateway_vpn_ip": "10.9.0.1",
