@@ -27,7 +27,7 @@ class MTLSGateway:
                  wg_interface='wg0',
                  forward_interface='ens38',
                  vpn_subnet='10.9.0.0/24',
-                 resource_subnet='10.10.2.0/24'):
+                 resource_subnet='192.168.240.130/24'):
         
         self.controller_host = controller_host
         self.controller_port = controller_port
