@@ -174,13 +174,14 @@ class SDPTopology:
         gateway.cmd('iptables -A FORWARD -i gateway-eth1 -o gateway-eth0 -j ACCEPT')
         gateway.cmd('iptables -A FORWARD -i gateway-eth0 -o gateway-eth1 -j ACCEPT')
         
-        # Allow client -> backend (this will be restricted by mTLS gateway to WireGuard only)
-        # For now, allow it so basic connectivity works
-        gateway.cmd('iptables -A FORWARD -i gateway-eth1 -o gateway-eth2 -j ACCEPT')
-        gateway.cmd('iptables -A FORWARD -i gateway-eth2 -o gateway-eth1 -j ACCEPT')
+        # DO NOT allow client -> backend before SPA authentication!
+        # This is the core of Zero Trust SDP:
+        # - Client CANNOT reach backend directly
+        # - Client can ONLY reach backend via WireGuard VPN AFTER SPA authentication
+        # - mTLS gateway will add: iptables -A FORWARD -i wg0 -o gateway-eth2 -j ACCEPT
         
         # DO NOT allow backend <-> internet direct traffic (Zero Trust)
-        # Backend traffic must go through client network (which will be VPN-only after mTLS setup)
+        # Backend is completely isolated
         
         info('*** Network configuration complete\n')
     
@@ -206,8 +207,8 @@ class SDPTopology:
             ('Controller -> Backend (SHOULD FAIL)', controller, '10.10.2.2', False),
             ('Backend -> Controller (SHOULD FAIL)', backend, '10.10.0.2', False),
             
-            # Client can reach backend through gateway forwarding (will be VPN-only after SPA)
-            ('Client -> Backend (via Gateway forwarding)', client, '10.10.2.2', True),
+            # TRUE ZERO TRUST: Client CANNOT reach backend before SPA authentication
+            ('Client -> Backend (SHOULD FAIL - no SPA yet)', client, '10.10.2.2', False),
         ]
         
         passed = 0
@@ -239,8 +240,11 @@ class SDPTopology:
             info('*** ✓ Architecture verified:\n')
             info('***   - Client can send SPA to Controller (direct)\n')
             info('***   - Controller can send mTLS to Gateway (direct)\n')
-            info('***   - Client can reach Gateway (for WireGuard)\n')
-            info('***   - Zero Trust: Controller <-> Backend blocked\n\n')
+            info('***   - Client can reach Gateway (for WireGuard setup)\n')
+            info('***   - Zero Trust: Controller <-> Backend blocked\n')
+            info('***   - Zero Trust: Client <-> Backend blocked (before SPA)\n')
+            info('***   → Backend is completely isolated!\n')
+            info('***   → Only accessible via WireGuard VPN after SPA auth\n\n')
         else:
             info('*** ✗ Some tests failed\n\n')
     
@@ -272,20 +276,22 @@ class SDPTopology:
         
         info('Client (Remote):\n')
         info(f'  IP: 10.10.1.3/24\n')
-        info(f'  Can reach: Controller (SPA), Gateway (WireGuard)\n')
-        info(f'  Cannot reach: Backend (until VPN established)\n\n')
+        info(f'  Can reach: Controller (SPA), Gateway (WireGuard setup)\n')
+        info(f'  CANNOT reach: Backend (isolated - no access before SPA!)\n\n')
         
         info('Backend (Protected Resource):\n')
         info(f'  IP: 10.10.2.2/24\n')
-        info(f'  Isolated: Only accessible via Gateway\n')
-        info(f'  Zero Trust: Controller cannot reach directly\n')
-        info(f'  Note: Client can reach via Gateway (will be VPN-only after mTLS)\n\n')
+        info(f'  COMPLETELY ISOLATED:\n')
+        info(f'    ✗ Controller cannot reach it\n')
+        info(f'    ✗ Client cannot reach it (before SPA)\n')
+        info(f'    ✓ Only accessible via WireGuard VPN after SPA authentication\n\n')
         
         info('Zero Trust Verification:\n')
         info(f'  ✓ Controller <-> Backend: BLOCKED\n')
-        info(f'  ✓ Backend can only be reached through Gateway\n')
-        info(f'  ✓ Client -> Backend requires Gateway forwarding\n')
-        info(f'  → After SPA: mTLS Gateway will restrict to WireGuard only\n\n')
+        info(f'  ✓ Client <-> Backend: BLOCKED (before SPA)\n')
+        info(f'  ✓ Backend is completely isolated\n')
+        info(f'  → After SPA: mTLS Gateway adds WireGuard rules\n')
+        info(f'  → Only then: Client can access via VPN (10.9.0.x)\n\n')
         
         info('='*70 + '\n\n')
     
