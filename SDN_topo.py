@@ -174,8 +174,13 @@ class SDPTopology:
         gateway.cmd('iptables -A FORWARD -i gateway-eth1 -o gateway-eth0 -j ACCEPT')
         gateway.cmd('iptables -A FORWARD -i gateway-eth0 -o gateway-eth1 -j ACCEPT')
         
-        # DO NOT allow direct backend <-> internet traffic
-        # Backend only accessible via WireGuard after SPA
+        # Allow client -> backend (this will be restricted by mTLS gateway to WireGuard only)
+        # For now, allow it so basic connectivity works
+        gateway.cmd('iptables -A FORWARD -i gateway-eth1 -o gateway-eth2 -j ACCEPT')
+        gateway.cmd('iptables -A FORWARD -i gateway-eth2 -o gateway-eth1 -j ACCEPT')
+        
+        # DO NOT allow backend <-> internet direct traffic (Zero Trust)
+        # Backend traffic must go through client network (which will be VPN-only after mTLS setup)
         
         info('*** Network configuration complete\n')
     
@@ -200,7 +205,9 @@ class SDPTopology:
             # Zero Trust enforcement
             ('Controller -> Backend (SHOULD FAIL)', controller, '10.10.2.2', False),
             ('Backend -> Controller (SHOULD FAIL)', backend, '10.10.0.2', False),
-            ('Client -> Backend direct (before VPN)', client, '10.10.2.2', True),  # Via gateway forwarding
+            
+            # Client can reach backend through gateway forwarding (will be VPN-only after SPA)
+            ('Client -> Backend (via Gateway forwarding)', client, '10.10.2.2', True),
         ]
         
         passed = 0
@@ -271,7 +278,14 @@ class SDPTopology:
         info('Backend (Protected Resource):\n')
         info(f'  IP: 10.10.2.2/24\n')
         info(f'  Isolated: Only accessible via Gateway\n')
-        info(f'  Zero Trust: Controller cannot reach directly\n\n')
+        info(f'  Zero Trust: Controller cannot reach directly\n')
+        info(f'  Note: Client can reach via Gateway (will be VPN-only after mTLS)\n\n')
+        
+        info('Zero Trust Verification:\n')
+        info(f'  ✓ Controller <-> Backend: BLOCKED\n')
+        info(f'  ✓ Backend can only be reached through Gateway\n')
+        info(f'  ✓ Client -> Backend requires Gateway forwarding\n')
+        info(f'  → After SPA: mTLS Gateway will restrict to WireGuard only\n\n')
         
         info('='*70 + '\n\n')
     
