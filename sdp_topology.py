@@ -128,6 +128,13 @@ def create_sdp_topology():
     resource.cmd('/usr/sbin/sshd -D -o "ListenAddress=10.0.0.4" &')
     info('    ✓ sshd listening on 10.0.0.4:22\n')
 
+    info('*** Protecting Ryu REST API (port 8080) — allow only sdp_ctrl\n')
+    import subprocess
+    # Block all access to Ryu REST except from sdp_ctrl (10.0.0.2)
+    subprocess.run(['iptables', '-I', 'INPUT', '-p', 'tcp', '--dport', '8080',
+                    '!', '-s', '10.0.0.2', '-j', 'DROP'], check=False)
+    info('    ✓ iptables: port 8080 restricted to 10.0.0.2\n')
+
     info('*** Bringing up WireGuard on gateway\n')
     gateway = net.get('gateway')
     gateway.cmd('sysctl -w net.ipv4.ip_forward=1')

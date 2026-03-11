@@ -179,6 +179,16 @@ class SPAClient:
     def send_packet(self, is_keepalive=False):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            # Bind to the physical interface IP so keepalives always go via
+            # client-eth0 and never get misrouted through wg0_conn after
+            # WireGuard comes up and adds routes.
+            source_ip = self.config.get('source_ip') or self.get_client_ip()
+            if source_ip:
+                try:
+                    sock.bind((source_ip, 0))
+                except OSError:
+                    pass  # best effort — don't fail if bind fails
+
             packet = self.create_packet()
             sock.sendto(packet, (self.config['server_ip'], self.config['server_port']))
 

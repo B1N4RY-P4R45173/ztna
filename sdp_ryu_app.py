@@ -88,8 +88,14 @@ class SDPController(app_manager.RyuApp):
             self.logger.info(f'  dpid={dpid:#010x} port {p.port_no}: {p.name.decode()}')
 
         self.port_map[dpid] = ports
-        self.logger.info(f'Port map for dpid={dpid:#010x}: {ports}')
-        self._install_sdp_flows(datapath, ports)
+        self._register_datapath(datapath)
+        self.logger.info(f'Port map for dpid={dpid:#010x} (decimal={dpid}): {ports}')
+
+        # Normalise dpid to the switch number (last byte).
+        # OVS may set dpid as a large integer; Mininet s1=1, s2=2, etc.
+        switch_num = dpid & 0xFF
+        self.logger.info(f'Switch number (dpid & 0xFF) = {switch_num}')
+        self._install_sdp_flows(datapath, ports, switch_num)
 
     # ================================================================== #
     #  Packet-in — handle ARP and log unmatched IP packets                #
@@ -132,7 +138,9 @@ class SDPController(app_manager.RyuApp):
     # ================================================================== #
     #  Flow installation with explicit output ports                       #
     # ================================================================== #
-    def _install_sdp_flows(self, datapath, ports):
+    def _install_sdp_flows(self, datapath, ports, switch_num=None):
+        if switch_num is None:
+            switch_num = datapath.id & 0xFF
         """
         Install SDP policy flows using explicit output:PORT_NO actions.
 
@@ -146,6 +154,7 @@ class SDPController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser  = datapath.ofproto_parser
         dpid    = datapath.id
+        # Use switch_num for comparisons (last byte of dpid)
 
         # ── helper ────────────────────────────────────────────────────
         def port(name):
@@ -191,7 +200,7 @@ class SDPController(app_manager.RyuApp):
         # ─────────────────────────────────────────────────────────────
         # S1  ports: s1-eth1=client  s1-eth2=s2  s1-eth3=s3
         # ─────────────────────────────────────────────────────────────
-        if dpid == 1:
+        if switch_num == 1:
             h  = port('s1-eth1')   # client
             p2 = port('s1-eth2')   # towards s2 (sdp_ctrl)
             p3 = port('s1-eth3')   # towards s3 (gateway/resource)
@@ -224,7 +233,7 @@ class SDPController(app_manager.RyuApp):
         # ─────────────────────────────────────────────────────────────
         # S2  ports: s2-eth1=sdp_ctrl  s2-eth2=s1  s2-eth3=s3
         # ─────────────────────────────────────────────────────────────
-        elif dpid == 2:
+        elif switch_num == 2:
             h  = port('s2-eth1')   # sdp_ctrl
             p1 = port('s2-eth2')   # towards s1 (client)
             p3 = port('s2-eth3')   # towards s3 (gateway)
@@ -253,7 +262,7 @@ class SDPController(app_manager.RyuApp):
         # ─────────────────────────────────────────────────────────────
         # S3  ports: s3-eth1=gateway  s3-eth2=s2  s3-eth3=s1  s3-eth4=s4
         # ─────────────────────────────────────────────────────────────
-        elif dpid == 3:
+        elif switch_num == 3:
             h  = port('s3-eth1')   # gateway host
             p1 = port('s3-eth3')   # towards s1 (client)   FIX: was s3-eth2
             p2 = port('s3-eth2')   # towards s2 (sdp_ctrl) FIX: was s3-eth3
@@ -294,22 +303,15 @@ class SDPController(app_manager.RyuApp):
 
         # ─────────────────────────────────────────────────────────────
         # S4  ports: s4-eth1=resource  s4-eth2=s3
+        # Default DENY ALL — including gateway → resource.
+        # Dynamic per-session flows are installed by install_s4_flow()
+        # after successful SPA, and removed on session expiry.
         # ─────────────────────────────────────────────────────────────
-        elif dpid == 4:
-            p3 = port("s4-eth2")   # towards s3 (gateway)
-            h  = port("s4-eth1")   # resource host
-
-            # gateway → resource (SSH)
-            allow(PRIORITY_POLICY,
-                  dict(eth_type=0x0800, ip_proto=6,
-                       ipv4_src=IP_GATEWAY, ipv4_dst=IP_RESOURCE, tcp_dst=PORT_SSH), h)
-            # resource → gateway (SSH return)
-            allow(PRIORITY_POLICY,
-                  dict(eth_type=0x0800, ip_proto=6,
-                       ipv4_src=IP_RESOURCE, ipv4_dst=IP_GATEWAY, tcp_src=PORT_SSH), p3)
+        elif switch_num == 4:
+            pass   # no static allow rules — S4 is dark by default
 
         self.logger.info(f'✓ Flows installed on dpid={dpid:#010x}')
-        if dpid == 4:
+        if switch_num == 4:
             self._log_policy()
 
     # ================================================================== #
@@ -345,6 +347,92 @@ class SDPController(app_manager.RyuApp):
         datapath.send_msg(mod)
 
     # ================================================================== #
+    #  Datapath registry — track connected switches                       #
+    # ================================================================== #
+    def _register_datapath(self, datapath):
+        if not hasattr(self, 'datapaths'):
+            self.datapaths = {}
+        self.datapaths[datapath.id] = datapath
+
+    def _get_datapath(self, dpid):
+        if not hasattr(self, 'datapaths'):
+            self.datapaths = {}
+        return self.datapaths.get(dpid)
+
+    # ================================================================== #
+    #  Dynamic S4 flow management (called by SPA controller via REST)     #
+    # ================================================================== #
+    def install_s4_flow(self, session_timeout=300):
+        """
+        Install gateway→resource and resource→gateway TCP 22 flows on S4.
+        Called after successful SPA authentication.
+        Uses hard_timeout so OVS auto-removes if controller crashes.
+        Also installs matching flows on S3 for the resource↔gateway segment.
+        """
+        dp = self._get_datapath(4)
+        if not dp:
+            self.logger.error('S4 not connected — cannot install dynamic flow')
+            return False
+
+        parser  = dp.ofproto_parser
+        ports_s4 = self.port_map.get(4, {})
+        p3 = ports_s4.get('s4-eth2')   # towards s3
+        h  = ports_s4.get('s4-eth1')   # resource
+
+        if not p3 or not h:
+            self.logger.error('S4 port map incomplete')
+            return False
+
+        # gateway → resource TCP 22
+        self._add_flow(
+            dp, PRIORITY_POLICY,
+            parser.OFPMatch(eth_type=0x0800, ip_proto=6,
+                            ipv4_src=IP_GATEWAY, ipv4_dst=IP_RESOURCE,
+                            tcp_dst=PORT_SSH),
+            [parser.OFPActionOutput(h)],
+            hard_timeout=session_timeout
+        )
+        # resource → gateway TCP 22 return
+        self._add_flow(
+            dp, PRIORITY_POLICY,
+            parser.OFPMatch(eth_type=0x0800, ip_proto=6,
+                            ipv4_src=IP_RESOURCE, ipv4_dst=IP_GATEWAY,
+                            tcp_src=PORT_SSH),
+            [parser.OFPActionOutput(p3)],
+            hard_timeout=session_timeout
+        )
+
+        self.logger.info(
+            f'✓ Dynamic S4 flows installed '
+            f'(gateway↔resource TCP 22, timeout={session_timeout}s)'
+        )
+        return True
+
+    def remove_s4_flow(self):
+        """
+        Explicitly delete gateway↔resource flows from S4.
+        Called on session expiry or SPA revocation.
+        """
+        dp = self._get_datapath(4)
+        if not dp:
+            self.logger.error('S4 not connected — cannot remove dynamic flow')
+            return False
+
+        parser = dp.ofproto_parser
+
+        self._del_flow(dp, PRIORITY_POLICY,
+                       parser.OFPMatch(eth_type=0x0800, ip_proto=6,
+                                       ipv4_src=IP_GATEWAY, ipv4_dst=IP_RESOURCE,
+                                       tcp_dst=PORT_SSH))
+        self._del_flow(dp, PRIORITY_POLICY,
+                       parser.OFPMatch(eth_type=0x0800, ip_proto=6,
+                                       ipv4_src=IP_RESOURCE, ipv4_dst=IP_GATEWAY,
+                                       tcp_src=PORT_SSH))
+
+        self.logger.info('✓ Dynamic S4 flows removed (gateway↔resource blocked)')
+        return True
+
+    # ================================================================== #
     #  Logging                                                             #
     # ================================================================== #
     def _log_policy(self):
@@ -354,6 +442,7 @@ class SDPController(app_manager.RyuApp):
         self.logger.info(f'  {IP_CLIENT} → {IP_GATEWAY}  UDP {PORT_WG}   ✓ WireGuard')
         self.logger.info(f'  {IP_GATEWAY} → {IP_RESOURCE} TCP {PORT_SSH}  ✓ SSH')
         self.logger.info(f'  {IP_RESOURCE} ↔ client/ctrl               ✗ BLOCKED')
-        self.logger.info(f'  gateway ↔ sdp_ctrl TCP 5000               ✓ mTLS ')
+        self.logger.info(f'  gateway ↔ sdp_ctrl TCP 5000               ✓ mTLS')
+        self.logger.info(f'  gateway ↔ resource TCP 22                 ✗ BLOCKED (dynamic)')
         self.logger.info(f'  ALL OTHER TRAFFIC                          ✗ DROP')
         self.logger.info('─' * 55)

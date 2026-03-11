@@ -26,6 +26,7 @@ import ipaddress
 import uuid
 
 import mtls_controller
+import ryu_flow_manager
 
 
 class VPNIPPool:
@@ -374,6 +375,18 @@ class SPAServer:
             }
 
             logging.info(f"Session created: {client_id} → VPN IP: {vpn_ip_cidr}")
+
+            # Install dynamic S4 flow — open gateway↔resource path
+            flow_ok = ryu_flow_manager.install_s4_flow(
+                ryu_host=self.config.get('ryu_rest_host', '127.0.0.1'),
+                ryu_port=self.config.get('ryu_rest_port', 8080),
+                session_timeout=self.keepalive_timeout
+            )
+            if flow_ok:
+                logging.info("✓ S4 flow installed — gateway↔resource path open")
+            else:
+                logging.warning("⚠ S4 flow install failed — SSH may not work")
+
             self.send_gateway_details(addr, vpn_ip)
 
         except socket.timeout:
@@ -446,12 +459,19 @@ class SPAServer:
                         # FIX: pass vpn_ip and use resource_ip (not resource_id)
                         mtls_controller.send_remove_peer_to_gateway(
                             public_key=session['client_public_key'],
-                            vpn_ip=session['vpn_ip'],           # FIX: was missing
+                            vpn_ip=session['vpn_ip'],
                             access_port=session['access_port'],
                             protocol=session['protocol'],
-                            resource_ip=session['resource_ip'], # FIX: was resource_id
+                            resource_ip=session['resource_ip'],
                             client_id=client_id
                         )
+
+                        # Remove dynamic S4 flow — lock gateway↔resource path
+                        ryu_flow_manager.remove_s4_flow(
+                            ryu_host=self.config.get('ryu_rest_host', '127.0.0.1'),
+                            ryu_port=self.config.get('ryu_rest_port', 8080)
+                        )
+                        logging.info(f"✓ S4 flow removed for expired session {client_id}")
 
                         self.ip_pool.release_ip(client_id)
                         expired.append(client_id)
@@ -523,11 +543,15 @@ class SPAServer:
                 # FIX: pass vpn_ip and use resource_ip (not resource_id)
                 mtls_controller.send_remove_peer_to_gateway(
                     public_key=session['client_public_key'],
-                    vpn_ip=session['vpn_ip'],           # FIX: was missing
+                    vpn_ip=session['vpn_ip'],
                     access_port=session['access_port'],
                     protocol=session['protocol'],
-                    resource_ip=session['resource_ip'], # FIX: was resource_id
+                    resource_ip=session['resource_ip'],
                     client_id=client_id
+                )
+                ryu_flow_manager.remove_s4_flow(
+                    ryu_host=self.config.get('ryu_rest_host', '127.0.0.1'),
+                    ryu_port=self.config.get('ryu_rest_port', 8080)
                 )
                 self.ip_pool.release_ip(client_id)
             except Exception as e:
