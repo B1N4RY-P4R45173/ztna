@@ -1,9 +1,9 @@
 {
-    "server_ip": "192.168.240.128",
-    "client_ip": "",
+    "server_ip": "10.0.0.2",
+    "source_ip": "10.0.0.1",
     "server_port": 62201,
     "access_port": 22,
-    "resource_ip" : "resource-1",
+    "resource_ip": "10.0.0.4",
     "protocol": "tcp",
     "encryption_key": "your-encryption-key-here",
     "hmac_key": "your-hmac-key-here",

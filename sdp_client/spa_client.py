@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import socket
 import json
 import sys
@@ -18,100 +19,106 @@ import wireguard
 
 
 class SPAClient:
-    def __init__(self, config_file='client_config.json', verbose=False, access_port=None, 
-             server_port=62201, protocol='tcp', source_ip=None, keepalive_interval=240):
-        # Initialize verbose first so it can be used in load_config
+    def __init__(self, config_file='client_config.json', verbose=False,
+                 access_port=None, server_port=62201, protocol='tcp',
+                 source_ip=None, keepalive_interval=240):
+
         self.verbose = verbose
-        
-        # Load configuration
         self.load_config(config_file)
-        
-        # Apply config defaults first, then command line overrides
-        if not verbose:  # Only use config verbose if command line wasn't specified
+
+        # Config defaults, then CLI overrides
+        if not verbose:
             self.verbose = self.config.get('verbose', False)
         self.keepalive_interval = self.config.get('keepalive_interval', 240)
-        
-        # Command line arguments override config file settings
-        if access_port:
-            self.config['access_port'] = access_port
-        if source_ip:
-            self.config['source_ip'] = source_ip
-        if server_port != 62201:  # Only override if non-default port specified
-            self.config['server_port'] = server_port
-        if protocol != 'tcp':  # Only override if non-default protocol specified
-            self.config['protocol'] = protocol
-        if keepalive_interval != 240:  # Only override if non-default interval specified
-            self.keepalive_interval = keepalive_interval
-        
+
+        if access_port:                    self.config['access_port']  = access_port
+        if source_ip:                      self.config['source_ip']    = source_ip
+        if server_port != 62201:           self.config['server_port']  = server_port
+        if protocol != 'tcp':             self.config['protocol']     = protocol
+        if keepalive_interval != 240:     self.keepalive_interval     = keepalive_interval
+
         self.setup_crypto(self.password)
         self.keepalive_timer = None
 
-    def get_client_ip(self): 
+    # ------------------------------------------------------------------ #
+    #  Config / crypto                                                     #
+    # ------------------------------------------------------------------ #
+    def get_client_ip(self):
         """
-        this only gets the private ip and will only work if the client is inside the home 
-        network for prod servers please pass the ip in config file or as a command line argument
+        Get local IP via socket trick.
+        FIX: falls back to config value if this fails (e.g. inside Mininet
+        where there's no route to 8.8.8.8). Always set source_ip in
+        client_config.json when running inside Mininet.
         """
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            # FIX: in Mininet there's no internet — fall back gracefully
+            print("Warning: could not auto-detect IP (no internet route). "
+                  "Set 'source_ip' in client_config.json.")
+            return None
 
     def load_config(self, config_file):
         try:
             with open(config_file, 'r') as f:
                 self.config = json.load(f)
             if not self.config.get("source_ip"):
-                self.config['source_ip'] = self.get_client_ip() # get client ip using sockets
-            self.password = self.config['encryption_key'] # get the encryptionkey from config file
+                detected = self.get_client_ip()
+                if not detected:
+                    print("Error: source_ip not set in config and could not be auto-detected.")
+                    sys.exit(1)
+                self.config['source_ip'] = detected
+            self.password = self.config['encryption_key']
         except FileNotFoundError:
-            print(f"Error: Configuration file {config_file} not found")
+            print(f"Error: Config file '{config_file}' not found")
             sys.exit(1)
         except json.JSONDecodeError:
-            print(f"Error: Invalid JSON in configuration file {config_file}")
+            print(f"Error: Invalid JSON in '{config_file}'")
             sys.exit(1)
         if self.verbose:
-                print(f"Detected source IP: {self.config['source_ip']}")
+            print(f"Source IP: {self.config['source_ip']}")
 
     def setup_crypto(self, password):
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
-            length=64,  # first32 bytes for AES and next 32 for HMAC
-            salt=b'ztna_salt', 
+            length=64,
+            salt=b'ztna_salt',
             iterations=100000,
             backend=default_backend()
         )
-        master_key = kdf.derive(password.encode('utf-8'))
+        master_key          = kdf.derive(password.encode('utf-8'))
         self.encryption_key = master_key[:32]
-        self.hmac_key = master_key[32:]
-    
+        self.hmac_key       = master_key[32:]
+
+    # ------------------------------------------------------------------ #
+    #  Packet creation                                                     #
+    # ------------------------------------------------------------------ #
     def create_packet(self):
-        iv = os.urandom(16) # Generate a new IV for each packet
+        iv = os.urandom(16)
 
         packet_data = {
-            'source_ip': self.config['source_ip'],
+            'source_ip':   self.config['source_ip'],
             'access_port': self.config['access_port'],
-            'protocol': self.config['protocol'],
-            'timestamp': int(time.time()),
-            'message': 'SPA request from SDP Client',
-            'resource_ip':self.config['resource_ip']
-        }      
+            'protocol':    self.config['protocol'],
+            'timestamp':   int(time.time()),
+            'message':     'SPA request from SDP Client',
+            'resource_ip': self.config['resource_ip']
+        }
+
         if self.verbose:
             print("\nPacket data:")
             pprint.pprint(packet_data)
 
-        json_data = json.dumps(packet_data).encode()
-        h = hmac.new(self.hmac_key, json_data, hashlib.sha256)
-        hmac_digest = h.digest()
-        
-        if self.verbose:
-            print(f"\nHMAC digest (hex):")
-            print(hmac_digest.hex())
-        
-        # Combine data and HMAC
-        final_data = json_data + hmac_digest
+        json_data    = json.dumps(packet_data).encode()
+        h            = hmac.new(self.hmac_key, json_data, hashlib.sha256)
+        hmac_digest  = h.digest()
+        final_data   = json_data + hmac_digest
 
-        padder = padding.PKCS7(128).padder()
+        padder      = padding.PKCS7(128).padder()
         padded_data = padder.update(final_data) + padder.finalize()
 
         cipher = Cipher(
@@ -122,161 +129,197 @@ class SPAClient:
         encryptor = cipher.encryptor()
         encrypted = encryptor.update(padded_data) + encryptor.finalize()
 
-        final_packet = iv + encrypted # the first 16 bits is the iv which will be extracted on server side
-        
-        if self.verbose:
-            print(f"\nEncrypted data (base64):")
-            print(base64.b64encode(final_packet).decode())
-        
-        return final_packet
+        return iv + encrypted
 
-    def send_keepalive(self):
+    # ------------------------------------------------------------------ #
+    #  Key exchange                                                        #
+    # ------------------------------------------------------------------ #
+    def send_wireguard_key(self, sock, key_port):
+        """
+        Send WireGuard public key to the server's ephemeral key_port.
+        FIX: server now sends back the ephemeral port to use — we must
+        send to that port, not the original SPA port (62201).
+        """
         try:
-            self.send_packet(is_keepalive=True)
-            if self.verbose:
-                print(f"Keepalive packet sent to {self.config['server_ip']}:{self.config['server_port']}")
-        except Exception as e:
-            print(f"Error sending keepalive packet: {str(e)}")
-        finally:
-            # Schedule next keepalive
-            self.keepalive_timer = threading.Timer(
-                self.keepalive_interval,
-                self.send_keepalive
-            )
-            self.keepalive_timer.start()
-    
-    def send_wireguard_key(self, sock):
-        try: 
             public_key = wireguard.get_public_key()
-            
+
             if self.verbose:
-                print(f"WireGuard public key sent to the server: {public_key}")
+                print(f"Sending WireGuard public key to port {key_port}: {public_key}")
 
             key_bytes = str(public_key).encode()
-            sock.sendto(key_bytes, (self.config['server_ip'], self.config['server_port']))
-            sock.settimeout(5)
+            sock.sendto(key_bytes, (self.config['server_ip'], key_port))
+            sock.settimeout(10)
 
             try:
-                response, addr = sock.recvfrom(1024)
+                response, addr = sock.recvfrom(4096)
                 if response:
+                    # First check if this is another control message
+                    try:
+                        ctrl = json.loads(response.decode())
+                        if ctrl.get('status') == 'error':
+                            print(f"Server error: {ctrl.get('message')}")
+                            return False
+                    except json.JSONDecodeError:
+                        pass
+
                     wireguard.get_wireguard_conf(response)
-                    # print("Server response to key:", response.decode())
+                    return True
 
             except socket.timeout:
-                print("No response received after sending WireGuard key")
+                print("No response after sending WireGuard key")
+                return False
 
         except Exception as e:
             print(f"Error sending WireGuard key: {e}")
+            return False
 
+    # ------------------------------------------------------------------ #
+    #  Main send                                                           #
+    # ------------------------------------------------------------------ #
     def send_packet(self, is_keepalive=False):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # Open a UDP socket
-            packet = self.create_packet() # Create the packet
-
+            packet = self.create_packet()
             sock.sendto(packet, (self.config['server_ip'], self.config['server_port']))
 
-            if not is_keepalive:
-                print(f"SPA packet sent to {self.config['server_ip']}:{self.config['server_port']}")
-            else:
-                print(f"sent a Keepalive packet")
+            if is_keepalive:
+                print("Sent keepalive packet")
+                return True
 
-            if self.verbose and not is_keepalive:
+            print(f"SPA packet sent to {self.config['server_ip']}:{self.config['server_port']}")
+            if self.verbose:
                 print(f"Requesting access to port: {self.config['access_port']}")
-            
-            # Only wait for response and send WireGuard key for initial packets, not keepalive
-            if not is_keepalive:
-                sock.settimeout(5)
+
+            sock.settimeout(5)
+            try:
+                response, addr = sock.recvfrom(4096)
+                if not response:
+                    return False
+
+                response_str = response.decode()
+                print(response_str)
+
+                # FIX: parse server's response.
+                # Server sends two messages:
+                #   1. Plain text "SPA Verification successful"
+                #   2. JSON {"status": "send_key", "key_port": XXXX}
+                # We need to read both before sending the WG key.
                 try:
-                    response, addr = sock.recvfrom(1024)
-                    
-                    if response:
-                        print(response.decode())
-                        # Only send WireGuard key for successful initial authentication
-                        self.send_wireguard_key(sock)
-                        return True  # Success
-                            
-                except socket.timeout:
-                    print("No response received from server")
-                    return False  # Failed
-            
-            return True  # For keepalive packets, assume success
+                    ctrl = json.loads(response_str)
+                    if ctrl.get('status') == 'send_key':
+                        key_port = ctrl['key_port']
+                        if self.verbose:
+                            print(f"Server ready for WireGuard key on port {key_port}")
+                        return self.send_wireguard_key(sock, key_port)
+                    elif ctrl.get('status') == 'error':
+                        print(f"Server error: {ctrl.get('message')}")
+                        return False
+                except json.JSONDecodeError:
+                    # Plain text response (e.g. "SPA Verification successful")
+                    # Read the NEXT message which should be the send_key JSON
+                    if self.verbose:
+                        print("Plain text ack received — waiting for key_port assignment...")
+                    try:
+                        sock.settimeout(5)
+                        response2, _ = sock.recvfrom(4096)
+                        ctrl = json.loads(response2.decode())
+                        if ctrl.get('status') == 'send_key':
+                            key_port = ctrl['key_port']
+                            if self.verbose:
+                                print(f"Server ready for WireGuard key on port {key_port}")
+                            return self.send_wireguard_key(sock, key_port)
+                        elif ctrl.get('status') == 'error':
+                            print(f"Server error: {ctrl.get('message')}")
+                            return False
+                    except (socket.timeout, json.JSONDecodeError, KeyError) as e:
+                        if self.verbose:
+                            print(f"Could not get key_port from server: {e}")
+                        return False
+
+            except socket.timeout:
+                print("No response from server")
+                return False
 
         except Exception as e:
-            print(f"Error sending packet: {str(e)}")
-            return False  # Failed
+            print(f"Error sending packet: {e}")
+            return False
         finally:
             sock.close()
 
+    # ------------------------------------------------------------------ #
+    #  Keepalive                                                           #
+    # ------------------------------------------------------------------ #
+    def send_keepalive(self):
+        try:
+            self.send_packet(is_keepalive=True)
+        except Exception as e:
+            print(f"Error sending keepalive: {e}")
+        finally:
+            self.keepalive_timer = threading.Timer(
+                self.keepalive_interval, self.send_keepalive)
+            self.keepalive_timer.start()
+
     def start_keepalive(self):
-        # Start keepalive timer
         self.keepalive_timer = threading.Timer(
-            self.keepalive_interval,
-            self.send_keepalive
-        )
+            self.keepalive_interval, self.send_keepalive)
         self.keepalive_timer.start()
-        if self.verbose:
-            print(f"Keepalive mechanism started (interval: {self.keepalive_interval} seconds)")
-        else:
-            print("Keepalive mechanism started")
+        print(f"Keepalive started (interval: {self.keepalive_interval}s)")
 
     def stop_keepalive(self):
         if self.keepalive_timer:
             self.keepalive_timer.cancel()
-            print("Keepalive mechanism stopped")
+            print("Keepalive stopped")
+
+
+# ======================================================================== #
+#  Entry point                                                              #
+# ======================================================================== #
 def main():
     parser = argparse.ArgumentParser(
         description='SPA Client - Sends Single Packet Authorization',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''Examples:
-  Request access to port 80 (TCP):
-    python3 spa_client.py -A 80 -p 62201
-
-  Request access to port 53 (UDP):
-    python3 spa_client.py -A 53 -P udp -p 62201
-
-  Request access to port 443 with verbose output:
-    python3 spa_client.py -A 443 -p 62201 -v
-
-  Specify source IP and keepalive interval:
-    python3 spa_client.py -A 80 -s 192.168.1.100 -k 120 (for 2 minutes)
-
-  Use custom config file:
-    python3 spa_client.py -A 22 -p 62201 -c custom_config.json
-''')
-    parser.add_argument('-A', '--access', type=int,
-                      help='Target port to request access to (overrides config file)')
-    parser.add_argument('-p', '--port', type=int, default=62201,
-                      help='Destination port to send SPA packet to (default: 62201)')
-    parser.add_argument('-P', '--protocol', choices=['tcp', 'udp'], default='tcp',
-                      help='Protocol to request access for (default: tcp)')
-    parser.add_argument('-s', '--source-ip', type=str,
-                      help='Override source IP address')
-    parser.add_argument('-k', '--keepalive', type=int, default=240,
-                      help='Keepalive interval in seconds (default: 240)')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                      help='Show verbose output including packet details')
-    parser.add_argument('-c', '--config', default='client_config.json',
-                      help='Path to config file (default: client_config.json)')
+  python3 spa_client.py -A 22
+  python3 spa_client.py -A 22 -v
+  python3 spa_client.py -A 22 -c custom_config.json
+'''
+    )
+    parser.add_argument('-A', '--access',     type=int,
+                        help='Port to request access to')
+    parser.add_argument('-p', '--port',       type=int, default=62201,
+                        help='SPA server port (default: 62201)')
+    parser.add_argument('-P', '--protocol',   choices=['tcp', 'udp'], default='tcp',
+                        help='Protocol (default: tcp)')
+    parser.add_argument('-s', '--source-ip',  type=str,
+                        help='Override source IP')
+    parser.add_argument('-k', '--keepalive',  type=int, default=240,
+                        help='Keepalive interval seconds (default: 240)')
+    parser.add_argument('-v', '--verbose',    action='store_true')
+    parser.add_argument('-c', '--config',     default='client_config.json')
     args = parser.parse_args()
 
-    client = SPAClient(config_file=args.config, access_port=args.access, 
-                      server_port=args.port, protocol=args.protocol,
-                      source_ip=args.source_ip, keepalive_interval=args.keepalive,
-                      verbose=args.verbose)
-    
-    # Send initial packet and check if successful
+    client = SPAClient(
+        config_file=args.config,
+        access_port=args.access,
+        server_port=args.port,
+        protocol=args.protocol,
+        source_ip=args.source_ip,
+        keepalive_interval=args.keepalive,
+        verbose=args.verbose
+    )
+
     if client.send_packet():
-        client.start_keepalive()  # Only start keepalive if initial packet was successful
+        client.start_keepalive()
         try:
-            # Keep the script running
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             client.stop_keepalive()
             print("\nClient shutting down")
     else:
-        print("Failed to connect to server. Exiting.")
+        print("Failed to connect. Exiting.")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
